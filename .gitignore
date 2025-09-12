@@ -10,8 +10,11 @@ wheels/
 .venv
 
 # configuration files
-config/config.json
-bin/config.json
+config/config.*
 
 # log files
 log/
+
+# UV
+uv.lock
+.python-version

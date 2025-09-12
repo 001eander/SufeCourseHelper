@@ -1,149 +1,128 @@
 import json
+import logging
+import random
 import time
-from random import randint
+import tomllib
 
 import requests
-from lxml import etree
+from bs4 import BeautifulSoup
+
+logger = logging.getLogger("sufecoursehelper")
+log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+logger.addHandler(console_handler)
+logger.setLevel(logging.INFO)
 
 
-def get_time():
-    return time.strftime("%X", time.localtime())
+class LessonElector:
+    def __init__(self, profile_id, request_config, headers):
+        self.profile_id = profile_id
+        self.headers = headers
 
-
-def rdint(l):
-    return randint(l[0], l[1])
-
-
-def output(text):
-    text = get_time() + " " + text
-    print(text)
-
-
-def make_request(url, ck, hd):
-    for i in range(retry):
-        try:
-            res = requests.get(url, cookies=ck, headers=hd)
-            res.encoding = "utf-8"
-            if res.status_code == 200:
-                return res
-        except Exception as e:
-            output("[Error]" + str(e))
-            output("[Warn] 正在尝试重连...({}/{})".format(i + 1, retry))
-            time.sleep(3)
-    else:  # inserted
-        output("[Warn] 重连失败,已暂时跳过该请求")
-
-
-def monitor(ids):
-    url = "/stdElectCourse!queryStdCount.action?profileId=" + profileId
-    res = make_request(url, cookies, headers)
-    if res is not None:
-        try:
-            student_count_text = res.text.split("window.lessonId2Counts=")[1]
-            replace_list = ["sc", "lc"]
-            for replace_text in replace_list:
-                student_count_text = student_count_text.replace(
-                    "{}:".format(replace_text), '"{}":'.format(replace_text)
-                )
-            student_count_text = student_count_text.replace("'", '"')
-            student_count_list = json.loads(student_count_text)
-            for wanted_course_id in wanted_course_ids:
-                course_count = student_count_list[wanted_course_id]
-                if course_count["sc"] != course_count["lc"]:
-                    output(
-                        "[Info] 课程(id:{})出现余量({}/{}),正在提交选课请求".format(
-                            wanted_course_id, course_count["sc"], course_count["lc"]
-                        )
-                    )
-                    code = submit(wanted_course_id)
-                    if code == 0:
-                        wanted_course_ids.remove(wanted_course_id)
-                        if wanted_course_ids == []:
-                            break
-        except IndexError:
-            output("[Error] Cookie已失效,请重新获取")
-            input("按回车键退出...")
-            exit()
-
-
-def submit(id):
-    url = (
-        host
-        + ["/stdElectCourse!batchOperator.action?"] * "profileId={}".format(profileId)
-        + "&electLessonIds={}".format(id)
-        + "&withdrawLessonIds="
-        + "&v={}".format(time.time())
-    )
-    for i in range(retry):
-        time.sleep(rdint(request_frequence))
-        res = make_request(url, cookies, headers)
-        if res is not None:
-            html = etree.HTML(res.text)
-            tip = html.xpath("//div/text()")[0].strip()
-            output(tip)
-            if "成功" in tip:
-                output("[Info] 成功抢到课程(id:{})".format(id))
-                return 0
-            output("[Warn] 选课提交失败,请检查所选课程(id:{})".format(id))
-        else:  # inserted
-            continue
-    else:  # inserted
-        output("[Warn] 选课提交失败,已暂时跳过所选课程(id:{})".format(id))
-
-
-caption = [
-    r"  ____  _   _ _____ _____    ____                            _   _      _                 ",
-    r" / ___|| | | |  ___| ____|  / ___|___  _   _ _ __ ___  ___  | | | | ___| |_ __   ___ _ __ ",
-    r" \___ \| | | | |_  |  _|   | |   / _ \| | | | '__/ __|/ _ \ | |_| |/ _ \ | '_ \ / _ \ '__|",
-    r"  ___) | |_| |  _| | |___  | |__| (_) | |_| | |  \__ \  __/ |  _  |  __/ | |_) |  __/ |   ",
-    r" |____/ \___/|_|   |_____|  \____\___/ \__,_|_|  |___/\___| |_| |_|\___|_| .__/ \___|_|   ",
-    r"                                                                         |_|              ",
-]
-print("\n".join(caption))
-print("=" * 37, "SUFE 选课助手", "=" * 38)  # 14
-print("=" * 36, "Author: Coder104", "=" * 36)  # 16
-print("=" * 38, "Version: 1.0", "=" * 38)  # 12
-
-output("[Warn] 仅供测试使用，请于下载后24小时内删除")
-output("[Warn] 最终解释权归学校教务处所有，请同学们不要依赖本软件")
-
-try:
-    with open("config/config.json", "r", encoding="utf-8") as f:
-        config = json.load(f)
-        profileId = config["profileId"]
-        wanted_course_ids = config["wanted_course_ids"]
-        cookies_raw = config["cookies_raw"]
-        request_frequence = config["request_frequence"]
-        retry = config["retry"]
-        host = config["host"]
-        useragent = config["useragent"]
-        output("[Info] 配置文件读取成功")
-
-        referer = (
-            host + "/stdElectCourse!defaultPage.action?electionProfile.id=" + profileId
+        self.delay = (
+            request_config["delay"]["min"],
+            request_config["delay"]["max"],
         )
-        cookies = {}
-        cookies_arr = cookies_raw.split(";")
-        for ck in cookies_arr:
-            name, value = ck.strip().split("=", 1)
-            cookies[name] = value
-        headers = {"User-Agent": useragent, "Referer": referer}
+        self.max_retry = request_config["max_retry"]
 
-except Exception as e:
-    print(e)
-    output("[Error] 配置文件有误,请检查后重试")
-    input("按回车键退出...")
-    exit()
+    def _make_request(self, url):
+        for retry_cnt in range(1, self.max_retry + 1):
+            try:
+                response = requests.get(url, headers=self.headers)
+                response.raise_for_status()
+                if response.status_code == 200:
+                    logger.debug(f"请求成功: {url}")
+                    return response
+                else:
+                    logger.error(
+                        f"{retry_cnt}/{self.max_retry}, 请求失败: {response.status_code}. 正在重试..."
+                    )
+                    time.sleep(random.uniform(*self.delay))
+            except requests.RequestException as e:
+                logger.error(
+                    f"{retry_cnt}/{self.max_retry}, 请求失败: {e}. 正在重试..."
+                )
+                time.sleep(random.uniform(*self.delay))
 
-count = 0
-while True:
-    if wanted_course_ids != []:
-        count += 1
-        output(f"[Info] 正在监测课程余量,已请求 {count} 次")
-        monitor(wanted_course_ids)
-        time.sleep(rdint(request_frequence))
-    else:
-        output("[Info] 所有课程均已抢到,感谢您的使用")
-        break
+    def get_lesson_cnt(self):
+        url = f"https://eams.sufe.edu.cn/eams/stdElectCourse!queryStdCount.action?profileId={self.profile_id}"
+        response = self._make_request(url)
+        if response:
+            res_text = response.text
+            json_text = res_text[res_text.index("{") :]
+            json_text = json_text.replace("'", '"')
+            json_text = json_text.replace("sc:", '"sc":').replace("lc:", '"lc":')
+            lesson_cnt = json.loads(json_text)
+            return {int(k): (v["sc"], v["lc"]) for k, v in lesson_cnt.items()}
+        return None
 
-input("按回车键退出...")
+    def _extract_elect_lesson_response(self, response):
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = soup.find("table")
+        if table:
+            first_tr = table.find("tr")  # type: ignore
+            if first_tr:
+                first_td = first_tr.find("td")  # type: ignore
+                if first_td:
+                    first_div = first_td.find("div")  # type: ignore
+                    if first_div:
+                        text = first_div.get_text(strip=True)  # type: ignore
+                        text = text.replace("</br>", "").strip()
+                        return text
+
+    def elect_lesson(self, lesson_id):
+        url = f"https://eams.sufe.edu.cn/eams/stdElectCourse!batchOperator.action?profileId={self.profile_id}&electLessonIds={lesson_id}&withdrawLessonIds=&v={time.time()}"
+        response = self._make_request(url)
+        if response:
+            message = self._extract_elect_lesson_response(response)
+            return message
+
+
+def main():
+    with open("config/config.toml", "rb") as f:
+        config = tomllib.load(f)
+    profile_id = config["profile_id"]
+    wanted_lessons = config["wanted_lessons"]
+    request_config = config["request_config"]
+    headers = config["headers"]
+
+    elector = LessonElector(profile_id, request_config, headers)
+
+    cnt = 0
+    while True:
+        cnt += 1
+        logger.info(
+            f"第 {cnt} 次检查课程 {', '.join(map(str, wanted_lessons))} 空缺..."
+        )
+        for lesson_id in wanted_lessons:
+            lesson_cnt = elector.get_lesson_cnt()
+
+            if not (lesson_cnt and lesson_id in lesson_cnt):
+                time.sleep(random.uniform(*elector.delay))
+                logger.error(f"获取课程空缺失败, 课程 {lesson_id} 未找到")
+                continue
+
+            current_num, limit_num = lesson_cnt[lesson_id]
+            if current_num < limit_num:
+                logger.info(f"课程 {lesson_id} 发现空缺: {current_num}/{limit_num}")
+                message = elector.elect_lesson(lesson_id)
+
+                if message is None:
+                    logger.error(f"选课请求失败: 课程 {lesson_id}")
+                    continue
+
+                logger.info(f"选课结果: {message}")
+
+                if "成功" in message:
+                    logger.info(f"课程 {lesson_id} 选课成功，停止尝试")
+                    wanted_lessons.remove(lesson_id)
+                elif "冲突" in message or "学分" in message or "已经选过" in message:
+                    logger.info(f"课程 {lesson_id} 选课失败，停止尝试")
+                    wanted_lessons.remove(lesson_id)
+
+            time.sleep(random.uniform(*elector.delay))
+
+
+if __name__ == "__main__":
+    main()
