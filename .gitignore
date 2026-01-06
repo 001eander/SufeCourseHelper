@@ -8,13 +8,3 @@ wheels/
 
 # Virtual environments
 .venv
-
-# configuration files
-config/config.*
-
-# log files
-log/
-
-# UV
-uv.lock
-.python-version
