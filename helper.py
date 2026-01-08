@@ -1,12 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "beautifulsoup4",
-#     "playwright",
-#     "requests",
-# ]
-# ///
-
 from __future__ import annotations
 
 import json
@@ -19,10 +10,17 @@ import time
 from argparse import ArgumentParser, RawTextHelpFormatter
 from dataclasses import dataclass
 from enum import Enum
+from venv import logger
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.DEBUG if "--debug" in sys.argv else logging.INFO,
+    datefmt="%y%m%d %H:%M:%S",
+)
 
 
 class SelectResult(Enum):
@@ -49,10 +47,16 @@ class CourseHelper:
         max_retry: int = 3,
         interval_range: tuple[int, int] = (5, 10),
     ):
+        self.stu_id = stu_id
+        self.password = password
+        self.max_retry = max_retry
+        self.interval_range = interval_range
+
         self.base_url = "https://eams.sufe.edu.cn/eams/stdElectCourse"
         self.login_url = f"{self.base_url}.action"
 
-        self.login(stu_id, password)
+        self.login()
+        logging.info(f"{stu_id} 登录成功，Profile ID: {self.profile_id}")
 
         self.spots_url = (
             f"{self.base_url}!queryStdCount.action?profileId={self.profile_id}"
@@ -63,16 +67,9 @@ class CourseHelper:
             + "&electLessonIds={course_id}"
         )
 
-        # self.headers = {"Technological": "Equality"}
-        self.headers = {}
-        self.headers["Cookie"] = ";".join([f"{k}={v}" for k, v in self.cookies.items()])
-
         self.download_no2id()
 
-        self.max_retry = max_retry
-        self.interval_range = interval_range
-
-    def login(self, stu_id: str, password: str) -> None:
+    def login(self) -> None:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context()
@@ -81,8 +78,8 @@ class CourseHelper:
             page.goto(self.login_url)
             page.wait_for_selector(".qrcode-close")
             page.locator(".qrcode-close").click()
-            page.get_by_role("textbox", name="请输入学号 / 工号").fill(stu_id)
-            page.get_by_role("textbox", name="请输入密码").fill(password)
+            page.get_by_role("textbox", name="请输入学号 / 工号").fill(self.stu_id)
+            page.get_by_role("textbox", name="请输入密码").fill(self.password)
             page.get_by_role("button", name="登 录").click()
 
             page.wait_for_url(self.login_url)
@@ -101,6 +98,9 @@ class CourseHelper:
             if c["name"] in ("JSESSIONID", "SF_cookie_75")  # type: ignore
         }
         self.profile_id = url.split("=")[-1]
+        self.headers = {
+            "Cookie": ";".join([f"{k}={v}" for k, v in self.cookies.items()])
+        }
 
     def download_no2id(self):
         res = requests.get(self.no2id_url, headers=self.headers)
@@ -113,10 +113,21 @@ class CourseHelper:
     def sleep(self):
         time.sleep(random.uniform(*self.interval_range))
 
-    def get_spots(self):
-        res = requests.get(self.spots_url, headers=self.headers)
+    def _get(self, url: str):
+        retry_cnt = 0
+        res = requests.get(url, headers=self.headers)
         res.raise_for_status()
+        while retry_cnt < self.max_retry and "expired" in res.text:
+            logging.error("Sesion 可能过期")
+            self.login()
+            res = requests.get(url, headers=self.headers)
+            retry_cnt += 1
+        return res
+
+    def get_spots(self):
+        res = self._get(self.spots_url)
         res_text = res.text
+        logging.debug(f"get_spots() [{res.status_code}]: {res_text[:100]}")
         # /*sc 当前人数, lc 人数上限*/ window.lessonId2Counts = { '407027': { sc: 12, lc: 20 }, ... }
         json_text = (
             res_text[res_text.index("{") :]
@@ -238,11 +249,5 @@ if __name__ == "__main__":
     debug_grp.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
 
     args = parser.parse_args()
-
-    logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        level=logging.DEBUG if args.debug else logging.INFO,
-        datefmt="%y%m%d %H:%M:%S",
-    )
 
     main(args)
