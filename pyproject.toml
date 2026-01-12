@@ -1,11 +1,11 @@
 [project]
 name = "sufecoursehelper"
-version = "2.0.0"
+version = "2.1.0"
 description = "SUFE Course Helper"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "bs4>=0.0.2",
     "playwright>=1.57.0",
-    "requests>=2.32.4",
+    "requests>=2.32.5",
 ]

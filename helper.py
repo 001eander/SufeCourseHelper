@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "bs4>=0.0.2",
+#     "playwright>=1.57.0",
+#     "requests>=2.32.5",
+# ]
+# ///
+
 from __future__ import annotations
 
 import json
@@ -87,6 +96,9 @@ class CourseHelper:
 
     # ERROR
     def login(self) -> None:
+        raise NotImplementedError(
+            "登录功能尚未修复，请使用 --cookies 和 --profile-id 参数进行认证。"
+        )
         assert (
             hasattr(self, "stu_id")
             and hasattr(self, "password")
