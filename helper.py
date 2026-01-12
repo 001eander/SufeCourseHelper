@@ -87,8 +87,6 @@ class CourseHelper:
             + "&electLessonIds={course_id}"
         )
 
-        self.curr_spots = None
-
     def auth(self) -> None:
         if self.auth_method == "cookies":
             self.cookies = input("请输入新的 cookies: ").strip()
@@ -141,9 +139,7 @@ class CourseHelper:
         self.headers = {"Cookie": self.cookies}
 
     def download_no2id(self):
-        res = requests.get(self.no2id_url, headers=self.headers)
-        res.raise_for_status()
-
+        res = self._get(self.no2id_url)
         pattern = re.compile(r"id:\s*(\d+),\s*no:\s*'([^']+)'")
         matches = pattern.findall(res.text)
         self.no2id_dict = {no: course_id for course_id, no in matches}
@@ -151,6 +147,9 @@ class CourseHelper:
     def no2id(self, crouse_no):
         if not hasattr(self, "no2id_dict"):
             self.download_no2id()
+            logging.debug(f"{len(self.no2id_dict) = }")
+            if len(self.no2id_dict) == 0:
+                raise RuntimeError("无法获取课程序号与课程 ID 的映射")
         return self.no2id_dict[crouse_no]
 
     def sleep(self):
@@ -160,8 +159,14 @@ class CourseHelper:
         retry_cnt = 0
         res = requests.get(url, headers=self.headers)
         res.raise_for_status()
-        while retry_cnt < self.max_retry and "expired" in res.text:
-            logging.error("Sesion 过期")
+        logging.debug(f"_get() [{res.status_code}]: {res.text}")
+        while retry_cnt < self.max_retry and (
+            "expired" in res.text or "统一身份认证中心" in res.text
+        ):
+            if "expired" in res.text:
+                logging.error("Sesion 过期")
+            elif "统一身份认证中心" in res.text:
+                logging.error("需要重新登录 SSO")
             self.auth()
             res = requests.get(url, headers=self.headers)
             retry_cnt += 1
@@ -189,14 +194,26 @@ class CourseHelper:
             .replace("lc:", '"lc":')
         )
         spots = {k: (v["sc"], v["lc"]) for k, v in json.loads(json_text).items()}
-        if self.curr_spots is None:
+        if not hasattr(self, "curr_spots"):
             self.curr_spots = spots
             save_spots(spots)
         elif self.curr_spots != spots:
-            release = all(s1[0] > s2[0] for s1, s2 in zip(self.curr_spots, spots))
-            logging.info(f"课程余位更新：{'放课' if release else '选课'}")
+            release = all(
+                self.curr_spots[course_no][0] > spots[course_no][0]
+                for course_no in spots
+            )
             if release:
+                logging.info("课程余位更新：放课")
                 save_spots(spots)
+            else:
+                logging.info("课程余位更新：选课")
+            assert self.curr_spots.keys() == spots.keys()
+            for course_no in spots:
+                if self.curr_spots[course_no] != spots[course_no]:
+                    logging.info(
+                        f"课程 ID {course_no} 余位变更："
+                        f"{self.curr_spots[course_no][0]} -> {spots[course_no][0]}"
+                    )
             self.curr_spots = spots
         return spots
 
