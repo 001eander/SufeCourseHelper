@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
+import os
 import random
 import re
 import subprocess
@@ -84,6 +86,8 @@ class CourseHelper:
             f"{self.base_url}!batchOperator.action?profileId={self.profile_id}"
             + "&electLessonIds={course_id}"
         )
+
+        self.curr_spots = None
 
     def auth(self) -> None:
         if self.auth_method == "cookies":
@@ -164,6 +168,16 @@ class CourseHelper:
         return res
 
     def get_spots(self):
+        def save_spots(spots):
+            os.makedirs("spots", exist_ok=True)
+            fname = os.path.join(
+                "spots",
+                f"{datetime.datetime.now().strftime('%y%m%d-%H%M%S')}.json",
+            )
+            with open(fname, "w", encoding="utf-8") as f:
+                json.dump(spots, f, ensure_ascii=False, indent=4)
+            logging.debug(f"已保存当前余位信息至 {fname}")
+
         res = self._get(self.spots_url)
         res_text = res.text
         logging.debug(f"get_spots() [{res.status_code}]: {res_text[:100]}")
@@ -174,8 +188,17 @@ class CourseHelper:
             .replace("sc:", '"sc":')
             .replace("lc:", '"lc":')
         )
-        spots = json.loads(json_text)
-        return {k: (v["sc"], v["lc"]) for k, v in spots.items()}
+        spots = {k: (v["sc"], v["lc"]) for k, v in json.loads(json_text).items()}
+        if self.curr_spots is None:
+            self.curr_spots = spots
+            save_spots(spots)
+        elif self.curr_spots != spots:
+            release = all(s1[0] > s2[0] for s1, s2 in zip(self.curr_spots, spots))
+            logging.info(f"课程余位更新：{'放课' if release else '选课'}")
+            if release:
+                save_spots(spots)
+            self.curr_spots = spots
+        return spots
 
     def select_(self, course_id: str):
         res = self._get(self.select_url.format(course_id=course_id))
