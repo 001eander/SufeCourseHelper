@@ -10,7 +10,6 @@ import time
 from argparse import ArgumentParser, RawTextHelpFormatter
 from dataclasses import dataclass
 from enum import Enum
-from venv import logger
 
 import requests
 from bs4 import BeautifulSoup
@@ -42,21 +41,31 @@ class Course:
 class CourseHelper:
     def __init__(
         self,
-        stu_id: str,
-        password: str,
+        cookies: str | None = None,
+        profile_id: str | None = None,
+        stu_id: str | None = None,
+        password: str | None = None,
         max_retry: int = 3,
         interval_range: tuple[int, int] = (5, 10),
     ):
-        self.stu_id = stu_id
-        self.password = password
+        self.base_url = "https://eams.sufe.edu.cn/eams/stdElectCourse"
+
         self.max_retry = max_retry
         self.interval_range = interval_range
 
-        self.base_url = "https://eams.sufe.edu.cn/eams/stdElectCourse"
-        self.login_url = f"{self.base_url}.action"
-
-        self.login()
-        logging.info(f"{stu_id} 登录成功，Profile ID: {self.profile_id}")
+        if cookies and profile_id:
+            self.auth_method = "cookies"
+            self.cookies = cookies
+            self.profile_id = profile_id
+            self.headers = {"Cookie": self.cookies}
+        elif stu_id and password:
+            self.auth_method = "login"
+            self.stu_id = stu_id
+            self.password = password
+            self.login_url = self.base_url + ".action"
+            self.login()
+        else:
+            raise ValueError("必须提供 cookies 和 profile_id 或 学号 和 密码")
 
         self.spots_url = (
             f"{self.base_url}!queryStdCount.action?profileId={self.profile_id}"
@@ -67,9 +76,22 @@ class CourseHelper:
             + "&electLessonIds={course_id}"
         )
 
-        self.download_no2id()
+    def auth(self) -> None:
+        if self.auth_method == "cookies":
+            self.cookies = input("请输入新的 cookies: ").strip()
+            self.headers = {"Cookie": self.cookies}
+        elif self.auth_method == "login":
+            self.login()
+        else:
+            raise ValueError("未知的认证方法")
 
+    # ERROR
     def login(self) -> None:
+        assert (
+            hasattr(self, "stu_id")
+            and hasattr(self, "password")
+            and hasattr(self, "login_url")
+        )
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context()
@@ -92,15 +114,15 @@ class CourseHelper:
             all_cookies = context.cookies()
             browser.close()
 
-        self.cookies = {
-            c["name"]: c["value"]  # type: ignore
-            for c in all_cookies
-            if c["name"] in ("JSESSIONID", "SF_cookie_75")  # type: ignore
-        }
+        self.cookies = ";".join(
+            [
+                f"{c['name']}={c['value']}"  # type: ignore
+                for c in all_cookies
+                if c["name"] in ("JSESSIONID", "SF_cookie_75")  # type: ignore
+            ]
+        )
         self.profile_id = url.split("=")[-1]
-        self.headers = {
-            "Cookie": ";".join([f"{k}={v}" for k, v in self.cookies.items()])
-        }
+        self.headers = {"Cookie": self.cookies}
 
     def download_no2id(self):
         res = requests.get(self.no2id_url, headers=self.headers)
@@ -108,7 +130,12 @@ class CourseHelper:
 
         pattern = re.compile(r"id:\s*(\d+),\s*no:\s*'([^']+)'")
         matches = pattern.findall(res.text)
-        self.no2id = {no: course_id for course_id, no in matches}
+        self.no2id_dict = {no: course_id for course_id, no in matches}
+
+    def no2id(self, crouse_no):
+        if not hasattr(self, "no2id_dict"):
+            self.download_no2id()
+        return self.no2id_dict[crouse_no]
 
     def sleep(self):
         time.sleep(random.uniform(*self.interval_range))
@@ -118,8 +145,8 @@ class CourseHelper:
         res = requests.get(url, headers=self.headers)
         res.raise_for_status()
         while retry_cnt < self.max_retry and "expired" in res.text:
-            logging.error("Sesion 可能过期")
-            self.login()
+            logging.error("Sesion 过期")
+            self.auth()
             res = requests.get(url, headers=self.headers)
             retry_cnt += 1
         return res
@@ -139,9 +166,7 @@ class CourseHelper:
         return {k: (v["sc"], v["lc"]) for k, v in spots.items()}
 
     def select_(self, course_id: str):
-        res = requests.get(
-            self.select_url.format(course_id=course_id), headers=self.headers
-        )
+        res = self._get(self.select_url.format(course_id=course_id))
         soup = BeautifulSoup(res.text, "html.parser")
         target = soup.select_one("table tr td div")
         if target:
@@ -155,24 +180,31 @@ class CourseHelper:
 
 def main(args):
     helper = CourseHelper(
-        args.stu_id,
-        args.password,
-        args.max_retry,
-        (args.min_interval, args.max_interval),
+        cookies=getattr(args, "cookies", None),
+        profile_id=getattr(args, "profile_id", None),
+        stu_id=getattr(args, "stu_id", None),
+        password=getattr(args, "password", None),
+        max_retry=args.max_retry,
+        interval_range=(args.min_interval, args.max_interval),
     )
 
     cnt = 1
-    courses = [(no, helper.no2id[no]) for no in args.courses]
+    courses = [(no, helper.no2id(no)) for no in args.courses]
     while courses:
         logging.info(f"第 {cnt} 次检查课程 {', '.join([no for no, _ in courses])} 空缺")
         spots = helper.get_spots()
+        to_remove = []
         for course_no, course_id in courses:
+            if course_id not in spots:
+                logging.warning(f"无法获取课程 {course_no} ({course_id}) 的余位信息")
+                continue
+
             if spots[course_id][0] < spots[course_id][1]:
                 result = helper.select_(course_id)
 
                 if result == SelectResult.SUCCESS:
                     logging.info(f"课程 {course_no} 选课成功，停止尝试")
-                    courses.remove((course_no, course_id))
+                    to_remove.append((course_no, course_id))
                     continue
 
                 if result in (
@@ -183,10 +215,13 @@ def main(args):
                     logging.info(
                         f"课程 {course_no} 选课失败（{result.name}），停止尝试"
                     )
-                    courses.remove((course_no, course_id))
+                    to_remove.append((course_no, course_id))
                     continue
 
                 logging.info(f"课程 {course_no} 选课失败（{result.name}），继续尝试")
+
+        for item in to_remove:
+            courses.remove(item)
 
         helper.sleep()
         cnt += 1
@@ -201,16 +236,22 @@ if __name__ == "__main__":
         prog="SUFE Course Helper",
         formatter_class=RawTextHelpFormatter,
         description="上海财经大学选课助手\n用于自动化登录 SSO 并针对指定课程序号进行选课。",
-        usage="uv run helper.py 学号 密码 课程序号 [课程序号 ...]",
+        usage="uv run helper.py [--stu-id 学号 --password 密码 | --cookies COOKIES --profile-id ID] 课程序号 ...",
         add_help=False,
     )
 
-    required = parser.add_argument_group("必需参数")
+    auth_grp = parser.add_argument_group("认证参数")
+    required = parser.add_argument_group("选课参数")
     config = parser.add_argument_group("运行配置")
     debug_grp = parser.add_argument_group("调试与帮助")
 
-    required.add_argument("stu_id", metavar="学号", help="您的学号")
-    required.add_argument("password", metavar="密码", help="您的统一身份认证密码")
+    auth_grp.add_argument("--stu-id", dest="stu_id", help="您的学号")
+    auth_grp.add_argument("--password", dest="password", help="您的统一身份认证密码")
+    auth_grp.add_argument("--cookies", dest="cookies", help="已登录的 Cookie")
+    auth_grp.add_argument(
+        "--profile-id", dest="profile_id", help="选课系统的 profileId"
+    )
+
     required.add_argument(
         "courses",
         metavar="课程序号",
@@ -249,5 +290,8 @@ if __name__ == "__main__":
     debug_grp.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
 
     args = parser.parse_args()
+
+    if not ((args.stu_id and args.password) or (args.cookies and args.profile_id)):
+        parser.error("必须提供 (学号 和 密码) 或 (cookies 和 profile_id)")
 
     main(args)
